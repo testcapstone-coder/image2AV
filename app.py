@@ -329,21 +329,38 @@ def generate_video(story: str, description: str, style_name: str) -> bytes:
             "Cloud secrets (or your local environment) and try again."
         )
 
+    prompt = build_video_prompt(story, description, style_name)
+
+    # Use the minimal request shown in Hugging Face's current Wan text-to-video
+    # example. In particular, do not pass negative_prompt here: some fal-ai
+    # responses currently omit the expected `video` key when optional provider
+    # parameters are rejected, which surfaces in huggingface_hub as KeyError('video').
     client = InferenceClient(
         provider="fal-ai",
         api_key=token,
     )
 
-    prompt = build_video_prompt(story, description, style_name)
-
-    video = client.text_to_video(
-        prompt,
-        model=VIDEO_MODEL,
-        negative_prompt=[VIDEO_NEGATIVE_PROMPT],
-    )
+    try:
+        video = client.text_to_video(
+            prompt,
+            model=VIDEO_MODEL,
+        )
+    except KeyError as exc:
+        # huggingface_hub's fal-ai adapter expects a response shaped as
+        # {"video": {"url": ...}}. If fal returns a provider-side error payload
+        # instead, older/current hub versions can expose it only as KeyError('video').
+        if exc.args == ("video",):
+            raise RuntimeError(
+                "The video provider did not return a video. This can happen when "
+                "the fal-ai service temporarily rejects the request, the model is "
+                "unavailable, or the Hugging Face account has insufficient inference "
+                "credits. Please try again shortly and check your Hugging Face "
+                "Inference Providers billing/credits if the problem continues."
+            ) from exc
+        raise
 
     if not isinstance(video, (bytes, bytearray)) or not video:
-        raise RuntimeError("The video model returned no video.")
+        raise RuntimeError("The video model returned no usable video data.")
 
     return bytes(video)
 
@@ -417,7 +434,13 @@ def render_video_section(result: dict):
             except Exception as exc:
                 LOGGER.exception("Video generation failed")
                 progress.empty()
-                st.error("We couldn't create the video. Your story and narration are still available.")
+                st.error(
+                    "We couldn't create the video. Your story and narration are still available."
+                )
+                st.info(
+                    "If this persists, verify that your HF_TOKEN has Inference Providers "
+                    "access and that your Hugging Face account still has inference credits."
+                )
                 with st.expander("Video generation details"):
                     st.text(str(exc))
 
